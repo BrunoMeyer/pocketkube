@@ -114,13 +114,21 @@ The setup script intentionally uses `busybox tar` to avoid that old extraction b
 
 ## Verify raw PRoot manually
 
-On old Android Termux, do **not** unset `LD_LIBRARY_PATH` before launching `proot`. The host-side PRoot binary may need `$PREFIX/lib` to load libraries such as `libtalloc` and `libandroid-support`.
+Modern Termux should launch PRoot without a forced `LD_LIBRARY_PATH`. PocketKube removes inherited `LD_LIBRARY_PATH` when `PREFIX` is set, avoiding collisions with Android system libraries (including the `libunwindstack.so` / `Xzs_Construct` linker error).
+
+For legacy Android 5/6 Termux installations that require `$PREFIX/lib` to find `libtalloc` or `libandroid-support`, explicitly set:
+
+```sh
+export POCKETKUBE_PROOT_LD_LIBRARY_PATH="$PREFIX/lib"
+```
+
+Leave this override unset on modern Termux. An empty override explicitly clears the host library path. The setting applies to Pod startup and exec, including interactive terminals.
 
 Use:
 
 ```sh
-export LD_LIBRARY_PATH="$PREFIX/lib"
-unset LD_PRELOAD
+unset LD_LIBRARY_PATH LD_PRELOAD
+# Legacy Android 5/6 only, if required: export LD_LIBRARY_PATH="$PREFIX/lib"
 
 proot \
   --link2symlink \

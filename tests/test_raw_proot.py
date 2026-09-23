@@ -40,6 +40,7 @@ def test_raw_proot_rejects_non_alpine(tmp_path):
 def test_old_termux_library_path_is_preserved_for_host(monkeypatch, tmp_path):
     runtime = RawProotRuntime(rootfs=make_rootfs(tmp_path))
     monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+    monkeypatch.setenv("POCKETKUBE_PROOT_LD_LIBRARY_PATH", "/data/data/com.termux/files/usr/lib")
     monkeypatch.setenv("LD_PRELOAD", "bad-preload.so")
     monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
 
@@ -141,3 +142,27 @@ def test_guest_devices_and_stdio(tmp_path):
     assert '/proc:/proc!' in cmd
     assert '/dev/null:/dev/null!' in cmd
     assert '/dev/urandom:/dev/urandom!' in cmd
+
+
+@pytest.mark.parametrize("inherited", [None, "/data/data/com.termux/files/usr/lib"])
+def test_modern_termux_does_not_shadow_android_libraries(monkeypatch, tmp_path, inherited):
+    monkeypatch.setenv("PREFIX", "/data/data/com.termux/files/usr")
+    monkeypatch.delenv("POCKETKUBE_PROOT_LD_LIBRARY_PATH", raising=False)
+    if inherited is None:
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    else:
+        monkeypatch.setenv("LD_LIBRARY_PATH", inherited)
+    monkeypatch.setenv("LD_PRELOAD", "termux-exec.so")
+    env = RawProotRuntime(rootfs=tmp_path)._host_environment()
+    assert "LD_LIBRARY_PATH" not in env
+    assert "LD_PRELOAD" not in env
+
+
+def test_empty_library_override_and_non_termux_environment(monkeypatch, tmp_path):
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.delenv("POCKETKUBE_PROOT_LD_LIBRARY_PATH", raising=False)
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/custom/lib")
+    runtime = RawProotRuntime(rootfs=tmp_path)
+    assert runtime._host_environment()["LD_LIBRARY_PATH"] == "/custom/lib"
+    monkeypatch.setenv("POCKETKUBE_PROOT_LD_LIBRARY_PATH", "")
+    assert "LD_LIBRARY_PATH" not in runtime._host_environment()

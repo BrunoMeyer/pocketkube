@@ -58,12 +58,17 @@ class RawProotRuntime:
     def _host_environment(self) -> dict[str, str]:
         env = os.environ.copy()
 
-        # Legacy Android 5/6 Termux executables depend on $PREFIX/lib through
-        # LD_LIBRARY_PATH. PRoot itself must see this host-side value in order
-        # to locate libraries such as libtalloc and libandroid-support.
-        prefix = env.get("PREFIX")
-        if prefix:
-            env["LD_LIBRARY_PATH"] = f"{prefix}/lib"
+        # Modern Termux binaries use their embedded library search paths.
+        # Forcing $PREFIX/lib can shadow Android's own liblzma and break
+        # libunwindstack (for example, missing Xzs_Construct).
+        override = env.get("POCKETKUBE_PROOT_LD_LIBRARY_PATH")
+        if override is not None:
+            if override:
+                env["LD_LIBRARY_PATH"] = override
+            else:
+                env.pop("LD_LIBRARY_PATH", None)
+        elif env.get("PREFIX"):
+            env.pop("LD_LIBRARY_PATH", None)
 
         # A Termux preload library must not leak into guest programs.
         env.pop("LD_PRELOAD", None)
@@ -110,8 +115,8 @@ class RawProotRuntime:
         if container_env:
             guest_command = ["/usr/bin/env", *container_env, *guest_command]
 
-        # LD_LIBRARY_PATH is required while Android starts the *host* PRoot
-        # executable, but must be removed before executing guest binaries.
+        # Any host library path selected for legacy PRoot must be removed
+        # before executing guest binaries.
         # Passing the actual command through "$@" avoids shell quoting bugs.
         wrapper = (
             "unset LD_LIBRARY_PATH LD_PRELOAD; "
