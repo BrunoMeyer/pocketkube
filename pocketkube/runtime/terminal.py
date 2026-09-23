@@ -7,7 +7,7 @@ import fcntl
 import os
 import pty
 import signal
-import shutil
+import logging
 from pathlib import Path
 import struct
 import sys
@@ -119,17 +119,26 @@ def terminal_host_command(command, env):
     Termux shell's exec interceptor mapped. Android may deny direct exec of
     app-data binaries even when their executable mode bits are correct.
     """
-    prefix = env.get('PREFIX')
-    if not prefix or not command:
+    if not command:
         return command
-    executable = shutil.which(command[0], path=env.get('PATH'))
-    if executable is None:
+    prefix = env.get('PREFIX') or env.get('TERMUX__PREFIX')
+    override = env.get('POCKETKUBE_TERMINAL_LINKER')
+    if not prefix and '/files/usr/' in sys.executable and sys.executable.startswith('/data/'):
+        prefix = sys.executable.split('/files/usr/', 1)[0] + '/files/usr'
+    if not prefix and not override:
         return command
-    path = Path(executable).resolve()
-    try:
-        path.relative_to(Path(prefix).resolve())
-    except ValueError:
-        return command
+    # shutil.which() checks X_OK. Android may deny that check on app-data
+    # executables even though they are readable and launchable via the linker.
+    candidates = ([Path(command[0])] if '/' in command[0] else
+                  [Path(directory or '.') / command[0] for directory in env.get('PATH', os.defpath).split(os.pathsep)])
+    path = next((candidate.resolve() for candidate in candidates if candidate.is_file()), None)
+    if path is None:
+        raise RuntimeError('terminal executable not found: ' + command[0])
+    if not override:
+        try:
+            path.relative_to(Path(prefix).resolve())
+        except ValueError:
+            return command
     try:
         with path.open('rb') as binary:
             header = binary.read(5)
@@ -137,9 +146,12 @@ def terminal_host_command(command, env):
         return command
     if header[:4] != b'\x7fELF' or header[4:] not in (b'\x01', b'\x02'):
         return command
-    linker = '/system/bin/linker64' if header[4] == 2 else '/system/bin/linker'
+    linker = override or ('/system/bin/linker64' if header[4] == 2 else '/system/bin/linker')
     if not Path(linker).is_file():
+        if override:
+            raise RuntimeError('configured terminal linker not found: ' + linker)
         return command
+    logging.getLogger('uvicorn.error').info('Terminal host launch: %s via %s', path, linker)
     return [linker, str(path), *command[1:]]
 
 

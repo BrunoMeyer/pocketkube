@@ -204,3 +204,38 @@ def test_terminal_keeps_scripts_and_missing_linkers_unchanged(tmp_path, monkeypa
     original = Path.is_file
     monkeypatch.setattr(Path, 'is_file', lambda path: False if str(path).startswith('/system/bin/linker') else original(path))
     assert terminal_host_command(command, env) == command
+
+
+def test_android_linker_selected_when_execute_access_is_denied(tmp_path, monkeypatch, caplog):
+    import os
+    import logging
+    from pathlib import Path
+    from pocketkube.runtime.terminal import terminal_host_command
+    binary = tmp_path / 'bin/proot'
+    binary.parent.mkdir()
+    binary.write_bytes(b'\x7fELF\x02')
+    binary.chmod(0o700)
+    # Reproduce Android's execute-access denial, which broke shutil.which.
+    monkeypatch.setattr(os, 'access', lambda *args, **kwargs: False)
+    original = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path: True if str(path) == '/system/bin/linker64' else original(path))
+    logger = logging.getLogger('uvicorn.error')
+    monkeypatch.setattr(logger, 'handlers', [caplog.handler])
+    for key in ('PREFIX', 'TERMUX__PREFIX'):
+        with caplog.at_level(logging.INFO, logger='uvicorn.error'):
+            result = terminal_host_command(['proot', '-0'], {key: str(tmp_path), 'PATH': str(binary.parent)})
+        assert result == ['/system/bin/linker64', str(binary), '-0']
+    assert 'via /system/bin/linker64' in caplog.text
+
+
+def test_explicit_terminal_linker_without_prefix(tmp_path):
+    from pocketkube.runtime.terminal import terminal_host_command
+    binary = tmp_path / 'proot'
+    binary.write_bytes(b'\x7fELF\x02')
+    linker = tmp_path / 'linker64'
+    linker.touch()
+    env = {'POCKETKUBE_TERMINAL_LINKER': str(linker)}
+    assert terminal_host_command([str(binary), '-0'], env) == [str(linker), str(binary), '-0']
+    env['POCKETKUBE_TERMINAL_LINKER'] = str(tmp_path / 'missing')
+    with pytest.raises(RuntimeError, match='configured terminal linker not found'):
+        terminal_host_command([str(binary)], env)

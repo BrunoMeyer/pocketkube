@@ -485,3 +485,5 @@ pip install -e . --no-deps
 `kubectl exec` uses the Kubernetes WebSocket remote-command protocol. With `-t`, PocketKube allocates a controlling PTY and forwards resize events; terminal stderr shares stdout. Without `-t`, stdin/stdout/stderr remain separate pipes. The host must support PTY allocation for interactive sessions.
 
 On Android, the interactive PTY helper launches Termux ELF executables through `/system/bin/linker` or `linker64` when available. This avoids direct-exec restrictions on app-data binaries without passing Termux preload libraries into the guest. The linker is selected from the executable’s ELF class, so both 32-bit and 64-bit Termux are supported.
+
+If a restricted Android installation still fails to select the terminal linker, set `POCKETKUBE_TERMINAL_LINKER=/system/bin/linker64` for a 64-bit Termux executable (or `/system/bin/linker` for 32-bit) before starting PocketKube. The server logs `Terminal host launch: ... via ...` when the linker is selected. Executable resolution deliberately avoids execute-access checks, since Android may deny direct execution while permitting the linker launch.

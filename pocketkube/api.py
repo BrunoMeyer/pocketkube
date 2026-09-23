@@ -470,25 +470,27 @@ def create_app(runtime_name: str | None = None) -> Starlette:
                 except (WebSocketDisconnect, RuntimeError, OSError):
                     disconnected = True
         finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if proc is not None:
-                try:
-                    if proc.returncode is None:
-                        proc.terminate()
-                        try:
-                            await asyncio.wait_for(proc.wait(), timeout=1)
-                        except asyncio.TimeoutError:
-                            proc.kill()
-                            await asyncio.wait_for(proc.wait(), timeout=1)
-                except (ProcessLookupError, asyncio.TimeoutError):
-                    pass
-                finally:
-                    if tty_enabled:
-                        proc.close()
-                    elif proc.stdin:
-                        proc.stdin.close()
+            # Disconnect cancellation must not interrupt process cleanup.
+            with anyio.CancelScope(shield=True):
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if proc is not None:
+                    try:
+                        if proc.returncode is None:
+                            proc.terminate()
+                            try:
+                                await asyncio.wait_for(proc.wait(), timeout=1)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                                await asyncio.wait_for(proc.wait(), timeout=1)
+                    except (ProcessLookupError, asyncio.TimeoutError):
+                        pass
+                    finally:
+                        if tty_enabled:
+                            proc.close()
+                        elif proc.stdin:
+                            proc.stdin.close()
             if not disconnected:
                 try:
                     await ws.close()
