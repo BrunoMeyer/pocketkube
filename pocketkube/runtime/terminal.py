@@ -7,6 +7,8 @@ import fcntl
 import os
 import pty
 import signal
+import shutil
+from pathlib import Path
 import struct
 import sys
 import termios
@@ -110,6 +112,37 @@ class TerminalProcess:
             self.master = None
 
 
+def terminal_host_command(command, env):
+    """Launch Termux ELF files through Android's linker, without LD_PRELOAD.
+
+    The PTY helper is a fresh Python process: it no longer has the original
+    Termux shell's exec interceptor mapped. Android may deny direct exec of
+    app-data binaries even when their executable mode bits are correct.
+    """
+    prefix = env.get('PREFIX')
+    if not prefix or not command:
+        return command
+    executable = shutil.which(command[0], path=env.get('PATH'))
+    if executable is None:
+        return command
+    path = Path(executable).resolve()
+    try:
+        path.relative_to(Path(prefix).resolve())
+    except ValueError:
+        return command
+    try:
+        with path.open('rb') as binary:
+            header = binary.read(5)
+    except OSError:
+        return command
+    if header[:4] != b'\x7fELF' or header[4:] not in (b'\x01', b'\x02'):
+        return command
+    linker = '/system/bin/linker64' if header[4] == 2 else '/system/bin/linker'
+    if not Path(linker).is_file():
+        return command
+    return [linker, str(path), *command[1:]]
+
+
 async def spawn_terminal(command, env=None):
     master, slave = pty.openpty()
     transport = None
@@ -118,6 +151,7 @@ async def spawn_terminal(command, env=None):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
         terminal_env = dict(os.environ if env is None else env)
         terminal_env.setdefault('TERM', 'xterm')
+        command = terminal_host_command(command, terminal_env)
         proc = await asyncio.create_subprocess_exec(
             sys.executable, '-c', _SETUP, *command,
             stdin=slave, stdout=slave, stderr=slave,

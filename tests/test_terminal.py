@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pytest
 from urllib.parse import urlencode
 
 from starlette.testclient import TestClient
@@ -170,3 +171,36 @@ def test_exec_spawn_error_is_reported():
             assert data[0] == 3
             assert json.loads(data[1:])['status'] == 'Failure'
             assert '/no/such/command' in json.loads(data[1:])['message']
+
+
+@pytest.mark.parametrize('elf_class,linker', [(1, '/system/bin/linker'), (2, '/system/bin/linker64')])
+def test_termux_terminal_uses_android_linker(tmp_path, monkeypatch, elf_class, linker):
+    from pathlib import Path
+    from pocketkube.runtime.terminal import terminal_host_command
+    binary = tmp_path / 'bin/proot'
+    binary.parent.mkdir()
+    binary.write_bytes(b'\x7fELF' + bytes([elf_class]) + b'fake')
+    binary.chmod(0o700)
+    original = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path: True if str(path) == linker else original(path))
+    env = {'PREFIX': str(tmp_path), 'PATH': str(binary.parent)}
+    command = ['proot', '-r', '/guest', '/bin/bash']
+    assert terminal_host_command(command, env) == [linker, str(binary), *command[1:]]
+    assert 'LD_PRELOAD' not in env
+    assert terminal_host_command(command, {'PATH': str(binary.parent)}) == command
+    assert terminal_host_command(['/bin/sh'], env) == ['/bin/sh']
+
+
+def test_terminal_keeps_scripts_and_missing_linkers_unchanged(tmp_path, monkeypatch):
+    from pathlib import Path
+    from pocketkube.runtime.terminal import terminal_host_command
+    binary = tmp_path / 'proot'
+    binary.write_text('#!/bin/sh\nexit 0\n')
+    binary.chmod(0o700)
+    env = {'PREFIX': str(tmp_path)}
+    command = [str(binary)]
+    assert terminal_host_command(command, env) == command
+    binary.write_bytes(b'\x7fELF\x02')
+    original = Path.is_file
+    monkeypatch.setattr(Path, 'is_file', lambda path: False if str(path).startswith('/system/bin/linker') else original(path))
+    assert terminal_host_command(command, env) == command
