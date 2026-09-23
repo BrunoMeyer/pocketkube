@@ -70,3 +70,33 @@ def test_metrics_discovery_and_routes(monkeypatch):
         response = client.get('/apis/metrics.k8s.io/v1beta1/nodes')
         assert response.status_code == 503
         assert response.json()['reason'] == 'ServiceUnavailable'
+
+
+def test_visible_process_metrics_and_warning(monkeypatch):
+    monkeypatch.setenv('POCKETKUBE_METRICS_SCOPE', 'visible-processes')
+    now = time.monotonic()
+    samples = iter([
+        ({(10, 1): (1, 100), (20, 1): (9, 100)}, now - .25),
+        ({(10, 1): (1.25, 200), (20, 2): (20, 300)}, now),
+    ])
+    monkeypatch.setattr('pocketkube.metrics.read_visible_processes', lambda: next(samples))
+    app = create_app('proot')
+    with TestClient(app) as client:
+        response = client.get('/apis/metrics.k8s.io/v1beta1/nodes')
+        assert response.status_code == 200
+        assert 'not the whole device' in response.headers['warning']
+        item = response.json()['items'][0]
+        assert item['usage'] == {'cpu': '1000000000n', 'memory': '500'}
+        assert item['metadata']['annotations']['pocketkube.io/metrics-scope'] == 'visible-processes'
+
+
+def test_visible_process_parser(tmp_path, monkeypatch):
+    from pocketkube.metrics import read_visible_processes
+    monkeypatch.setattr('os.sysconf', lambda key: 100 if key == 'SC_CLK_TCK' else 4096)
+    process = tmp_path / '123'
+    process.mkdir()
+    fields = ['0'] * 22
+    fields[0], fields[11], fields[12], fields[19], fields[21] = 'S', '100', '50', '800', '10'
+    (process / 'stat').write_text('123 (name with ) spaces) ' + ' '.join(fields))
+    snapshot, _ = read_visible_processes(tmp_path)
+    assert snapshot == {(123, 800): (1.5, 40960)}

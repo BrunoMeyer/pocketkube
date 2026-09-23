@@ -41,8 +41,39 @@ def read_host(proc=Path('/proc')):
     return busy / hz, memory, time.monotonic()
 
 
+def read_visible_processes(proc=Path('/proc')):
+    """Snapshot same-UID processes without reading aggregate host counters."""
+    hz = os.sysconf('SC_CLK_TCK')
+    pagesize = os.sysconf('SC_PAGE_SIZE')
+    if hz <= 0 or pagesize <= 0:
+        raise ValueError('invalid process accounting units')
+    processes = {}
+    for path in proc.iterdir():
+        if not path.name.isdigit():
+            continue
+        try:
+            if path.stat().st_uid != os.getuid():
+                continue
+            text = (path / 'stat').read_text()
+            # comm may contain spaces and parentheses; fields after its final )
+            # begin at field 3. starttime distinguishes PID reuse.
+            fields = text[text.rindex(')') + 2:].split()
+            cpu = (int(fields[11]) + int(fields[12])) / hz
+            rss = max(0, int(fields[21])) * pagesize
+            processes[(int(path.name), int(fields[19]))] = (cpu, rss)
+        except (OSError, ValueError, IndexError):
+            continue  # Processes can exit while /proc is being scanned.
+    if not processes:
+        raise ValueError('no readable same-user process counters')
+    return processes, time.monotonic()
+
+
+
 class HostMetrics:
     def __init__(self):
+        self.scope = os.environ.get('POCKETKUBE_METRICS_SCOPE', 'host')
+        if self.scope not in ('host', 'visible-processes'):
+            raise ValueError('POCKETKUBE_METRICS_SCOPE must be host or visible-processes')
         self.lock = asyncio.Lock()
         self.cached = None
         self.updated = 0.0
@@ -53,20 +84,33 @@ class HostMetrics:
                 return self.cached
             loop = asyncio.get_running_loop()
             try:
-                start, _, before = await loop.run_in_executor(None, read_host)
-                await asyncio.sleep(.25)
-                end, memory, after = await loop.run_in_executor(None, read_host)
+                if self.scope == 'visible-processes':
+                    first, before = await loop.run_in_executor(None, read_visible_processes)
+                    await asyncio.sleep(.25)
+                    last, after = await loop.run_in_executor(None, read_visible_processes)
+                    # Only stable PID/starttime pairs have a measured CPU delta.
+                    used = sum(max(0, last[key][0] - first[key][0]) for key in first.keys() & last.keys())
+                    memory = sum(value[1] for value in last.values())
+                else:
+                    start, _, before = await loop.run_in_executor(None, read_host)
+                    await asyncio.sleep(.25)
+                    end, memory, after = await loop.run_in_executor(None, read_host)
+                    if end < start:
+                        raise ValueError('CPU counters reset during sampling; retry the request')
+                    used = end - start
                 window = after - before
-                if window <= 0 or end < start:
-                    raise ValueError('CPU counters reset during sampling; retry the request')
+                if window <= 0:
+                    raise ValueError('invalid CPU sampling interval')
                 result = {
                     'timestamp': datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z'),
                     'window': f'{window:.9f}s',
-                    'usage': {'cpu': str(round((end - start) / window * 1_000_000_000)) + 'n',
+                    'usage': {'cpu': str(round(used / window * 1_000_000_000)) + 'n',
                               'memory': str(memory)},
                 }
             except (OSError, ValueError, IndexError, AttributeError) as exc:
-                raise RuntimeError('host metrics unavailable: ' + str(exc)) from exc
+                hint = ('; on restricted Android, opt in to same-user process metrics with '
+                        'POCKETKUBE_METRICS_SCOPE=visible-processes (not whole-device usage)') if self.scope == 'host' else ''
+                raise RuntimeError(self.scope + ' metrics unavailable: ' + str(exc) + hint) from exc
             self.updated = after
             self.cached = result
             return result

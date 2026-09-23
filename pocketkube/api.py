@@ -119,6 +119,12 @@ def create_app(runtime_name: str | None = None) -> Starlette:
             selected = select_fields([node], request.query_params.get("fieldSelector", ""), {"metadata.name"})
         except ValueError as exc:
             return JSONResponse(status_object(str(exc), 400, "BadRequest"), status_code=400)
+        response_headers = {}
+        annotations = {}
+        if metrics.scope == "visible-processes":
+            annotations["pocketkube.io/metrics-scope"] = "visible-processes"
+            response_headers["Warning"] = ('299 pocketkube "CPU and memory cover readable same-user processes, '
+                                           'not the whole device; memory is summed RSS"')
         items = []
         if selected:
             try:
@@ -126,12 +132,12 @@ def create_app(runtime_name: str | None = None) -> Starlette:
             except RuntimeError as exc:
                 return JSONResponse(status_object(str(exc), 503, "ServiceUnavailable"), status_code=503)
             items.append({"apiVersion": api_version, "kind": "NodeMetrics",
-                          "metadata": {"name": node["metadata"]["name"], "labels": node["metadata"]["labels"]},
+                          "metadata": {"name": node["metadata"]["name"], "labels": node["metadata"]["labels"], "annotations": annotations},
                           **sample})
         if name is not None:
             return JSONResponse(items[0] if items else status_object("node not found", 404, "NotFound"),
-                                status_code=200 if items else 404)
-        return JSONResponse(_list("NodeMetrics", api_version, items))
+                                status_code=200 if items else 404, headers=response_headers)
+        return JSONResponse(_list("NodeMetrics", api_version, items), headers=response_headers)
 
     async def nodes(request: Request):
         if request.query_params.get("watch", "false").lower() in ("true", "1"):

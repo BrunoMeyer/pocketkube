@@ -245,7 +245,17 @@ PocketKube serves `metrics.k8s.io/v1` and `v1beta1` directly; no metrics-server 
 
 These measurements cover the entire machine running PocketKube, including other applications. They are not per-Pod measurements or cgroup accounting, and can differ from kubelet/metrics-server figures. For the Docker backend they describe the PocketKube host, not a remote Docker daemon. CPU/memory allocatable values equal the reported host capacity because PocketKube reserves no resources; neither value enforces limits.
 
-Linux/Android must permit reading `/proc/stat` and `/proc/meminfo`. Restricted devices return a metrics-unavailable error instead of fabricated usage. `kubectl top pods`, metrics watches, and label selectors are not supported.
+By default, Linux/Android must permit reading `/proc/stat` and `/proc/meminfo`. Restricted devices return a metrics-unavailable error instead of fabricated usage. `kubectl top pods`, metrics watches, and label selectors are not supported.
+
+### Restricted Android metrics
+
+If Android denies `/proc/stat`, opt in to a narrower measurement before starting PocketKube:
+
+```sh
+POCKETKUBE_METRICS_SCOPE=visible-processes pocketkube serve --runtime proot
+```
+
+Then use `kubectl top nodes` normally. This mode measures readable processes owned by the PocketKube/Termux user, including other Termux sessions. It does **not** measure whole-device usage. CPU counts only processes present in both snapshots; short-lived processes can be missed. Memory is summed resident memory (RSS), which may double-count shared pages, rather than the host working-set estimate. Percentages still use host capacity. Responses include a scope annotation and a warning shown by kubectl. No root or Android security-policy changes are required, but same-user `/proc/PID/stat` files must be readable. Leave `POCKETKUBE_METRICS_SCOPE` unset (or set it to `host`) for full host metrics where permitted.
 
 ## Run the included Pod
 
