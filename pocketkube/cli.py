@@ -38,8 +38,8 @@ def main() -> None:
     serve.add_argument("--runtime", choices=["proot", "docker"], default=os.environ.get("POCKETKUBE_RUNTIME", "proot"))
     serve.add_argument(
         "--rootfs",
-        default=os.environ.get("POCKETKUBE_PROOT_ROOTFS", str(Path.home() / "rootfs" / "alpine")),
-        help="Alpine rootfs used by the raw PRoot runtime (default: ~/rootfs/alpine)",
+        default=os.environ.get("POCKETKUBE_PROOT_ROOTFS"),
+        help="Optional pre-extracted Alpine rootfs (bypasses registry for alpine images)",
     )
 
     cfg = sub.add_parser("kubeconfig", help="write a kubeconfig for kubectl")
@@ -49,7 +49,7 @@ def main() -> None:
     args = p.parse_args()
     if args.cmd == "serve":
         os.environ["POCKETKUBE_RUNTIME"] = args.runtime
-        if args.runtime == "proot":
+        if args.runtime == "proot" and args.rootfs:
             os.environ["POCKETKUBE_PROOT_ROOTFS"] = args.rootfs
         uvicorn.run("pocketkube.api:create_app", factory=True, host=args.host, port=args.port, log_level="info", ws="websockets")
     else:

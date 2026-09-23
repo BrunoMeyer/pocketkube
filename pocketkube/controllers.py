@@ -14,12 +14,18 @@ def _suffix(n: int = 5) -> str:
 
 
 class Controllers:
-    def __init__(self, state, runtime) -> None:
+    def __init__(self, state, runtime, node_name=None) -> None:
         self.state = state
         self.runtime = runtime
+        self.node_name = node_name
 
     async def create_pod(self, namespace: str, pod: dict[str, Any], owner: dict[str, Any] | None = None) -> dict[str, Any]:
         pod = ensure_metadata(pod, namespace)
+        if self.node_name:
+            spec = pod.setdefault("spec", {})
+            if spec.get("nodeName") not in (None, "", self.node_name):
+                raise ValueError("PocketKube only supports node " + self.node_name)
+            spec["nodeName"] = self.node_name
         meta = pod.setdefault("metadata", {})
         name = meta["name"]
         if owner:
@@ -41,11 +47,16 @@ class Controllers:
             return
         try:
             await self.runtime.start_pod(namespace, name, pod)
+            container = (pod.get("spec", {}).get("containers") or [{}])[0]
             pod["status"].update({
                 "phase": "Running",
                 "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": now_rfc3339()}],
                 "containerStatuses": [{
-                    "name": (pod.get("spec", {}).get("containers") or [{}])[0].get("name", "container"),
+                    "name": container.get("name", "container"),
+                    "image": container.get("image") or "",
+                    # Required by typed Kubernetes clients. The runtime interface
+                    # does not yet expose the resolved image ID.
+                    "imageID": "",
                     "ready": True,
                     "restartCount": 0,
                     "state": {"running": {"startedAt": now_rfc3339()}},

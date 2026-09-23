@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import ipaddress
 import re
 from typing import Any
 
 from .base import ExecResult
+from .logs import timestamp
+from .terminal import spawn_terminal
 
 
 def _name(ns: str, pod: str) -> str:
@@ -49,8 +53,60 @@ class DockerRuntime:
         rc, out, err = await self._call("exec", _name(namespace, pod_name), *command, check=False)
         return ExecResult(rc, out, err)
 
-    async def exec_stream(self, namespace: str, pod_name: str, pod: dict, command: list[str]):
+    async def exec_stream(self, namespace: str, pod_name: str, pod: dict, command: list[str], tty: bool = False):
+        if tty:
+            return await spawn_terminal([
+                self.binary, "exec", "-it", _name(namespace, pod_name), *command,
+            ])
         return await asyncio.create_subprocess_exec(
             self.binary, "exec", "-i", _name(namespace, pod_name), *command,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+
+    async def logs(self, namespace, pod_name, pod, options):
+        name = _name(namespace, pod_name)
+        # Fail before HTTP headers are sent when the container is unavailable.
+        await self._call("inspect", "--format", "{{.Id}}", name)
+        args = [self.binary, "logs", "--tail", str(options.tail) if options.tail >= 0 else "all"]
+        if options.follow:
+            args.append("--follow")
+        if options.timestamps:
+            args.append("--timestamps")
+        if options.since is not None:
+            args += ["--since", timestamp(options.since)]
+        args.append(name)
+
+        async def stream():
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+            try:
+                while True:
+                    data = await proc.stdout.read(8192)
+                    if not data:
+                        break
+                    yield data
+                await proc.wait()
+            finally:
+                if proc.returncode is None:
+                    proc.terminate()
+                    try:
+                        await asyncio.wait_for(proc.wait(), 1)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
+        return stream()
+
+    async def open_port(self, namespace, pod_name, pod, port):
+        _, output, _ = await self._call("inspect", _name(namespace, pod_name))
+        info = json.loads(output)[0]
+        if not info.get("State", {}).get("Running"):
+            raise RuntimeError("pod container is not running")
+        if info.get("HostConfig", {}).get("NetworkMode") == "host":
+            address = "127.0.0.1"
+        else:
+            networks = info.get("NetworkSettings", {}).get("Networks", {}).values()
+            address = next((network.get("IPAddress") or network.get("GlobalIPv6Address")
+                            for network in networks if network.get("IPAddress") or network.get("GlobalIPv6Address")), None)
+            if address is None:
+                raise RuntimeError("Docker container has no reachable network address")
+        return await asyncio.open_connection(str(ipaddress.ip_address(address)), port)

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import ExecResult
+from .terminal import spawn_terminal
 
 
 def _safe_name(value: str) -> str:
@@ -103,8 +104,10 @@ class ProotDistroRuntime:
         stdout, stderr = await proc.communicate()
         return ExecResult(proc.returncode or 0, stdout, stderr)
 
-    async def exec_stream(self, namespace: str, pod_name: str, pod: dict, command: list[str]):
+    async def exec_stream(self, namespace: str, pod_name: str, pod: dict, command: list[str], tty: bool = False):
         name = self.container_name(namespace, pod_name)
+        if tty:
+            return await spawn_terminal([self.binary, "login", name, "--", *command])
         return await asyncio.create_subprocess_exec(
             self.binary, "login", name, "--", *command,
             stdin=asyncio.subprocess.PIPE,

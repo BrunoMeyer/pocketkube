@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: filebrowser
+  labels:
+    app: filebrowser
+spec:
+  containers:
+    - name: fliebrowser
+      image: filebrowser/filebrowser:latest
+      imagePullPolicy: IfNotPresent
+      # PRoot does not grant permission to bind privileged host ports.
+      # Configure nginx itself: containerPort alone does not change its listener.
+      # command: ["/bin/sh", "-c", "sleep", "INF"]
+      # command: ["sleep", "INF"]
+      ports:
+        - name: http
+          containerPort: 8082
+      env:
+        - name: FB_PORT
+          value: '8082'
+        - name: FB_ADDRESS
+          value: 0.0.0.0
+        # - name: FB_BASE_URL
+        #   value: >-
+        #     /api/experimentexecutions/174/services/N8N/0/nginx-server
+        - name: FB_ROOT
+          value: /srv
+        - name: FB_DATABASE
+          value: /database/filebrowser.db

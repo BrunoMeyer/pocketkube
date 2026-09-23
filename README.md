@@ -9,7 +9,11 @@ It is a simulator/compatibility layer, not a real Kubernetes distribution or a s
 - Pods: create, get/list, delete
 - Deployments: create, get/list, delete, basic one-shot replica creation
 - Namespaces: basic create/get/list/delete
+- Nodes: get/list the single local PocketKube node
+- `kubectl top nodes`: host CPU and memory usage
 - `kubectl exec` using Kubernetes WebSocket remote-command channels
+- `kubectl logs` with follow, tail, timestamps, time filtering, and byte limits
+- `kubectl port-forward` over WebSocket for TCP connections
 - one container per Pod
 - raw rootless `proot` backend for Termux
 - Docker backend for desktop development
@@ -31,10 +35,29 @@ raw PRoot              Docker
 (Android/Termux)       (desktop testing)
    |
    v
-pre-extracted Alpine rootfs
+OCI image rootfs
 ```
 
-The raw PRoot backend currently supports only Alpine images and maps `alpine` / `alpine:*` to one pre-extracted Alpine root filesystem. It does **not** pull arbitrary OCI images yet.
+The raw PRoot backend pulls public Docker Hub and GHCR images using the Registry v2 API. It selects the host Linux architecture automatically, including `linux/arm/v7` on `armv7l`, verifies SHA-256 digests, and applies layers and whiteouts in order. Tags and digest references are supported.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+    - name: nginx
+      image: nginx:alpine
+```
+
+Start with `pocketkube serve --runtime proot` to enable registry images. References such as `ghcr.io/OWNER/IMAGE:TAG` work for public packages with a compatible platform. Image ENTRYPOINT and CMD provide defaults; Kubernetes `command` overrides ENTRYPOINT and `args` overrides CMD independently. Image environment, working directory and user are also read, with Pod `env` and `workingDir` taking precedence.
+
+Images are cached under `~/.pocketkube/images/<registry>/<repository>/sha256-<digest>/`. Each Pod receives a separate full filesystem copy, removed when the Pod is deleted. Allow disk space for both the cache and each Pod. `exec` uses the same copy as the running Pod.
+
+`imagePullPolicy` supports `Always`, `IfNotPresent`, and `Never`. Omitted/latest tags default to `Always`; other tags and digests default to `IfNotPresent`. Set `POCKETKUBE_IMAGE_DIR` to relocate the cache, or `POCKETKUBE_PLATFORM=linux/arm/v7` to select a platform explicitly (this does not provide CPU emulation).
+
+This initial puller supports public anonymous pulls, SHA-256, and uncompressed/gzip layers. Private registry credentials, imagePullSecrets, and zstd layers are not yet supported. Images with `/bin/sh` use the normal environment wrapper; shell-less images run directly without requiring `/bin/sh` or `/usr/bin/env`. Device nodes are skipped during rootless extraction. Kernel-dependent images still face PRoot limitations.
 
 ## Termux installation
 
@@ -59,9 +82,9 @@ pip install -e . --no-deps
 
 If `venv` is unavailable in the old Termux Python package, installing directly with `pip install -e . --no-deps` is sufficient for experimentation.
 
-## Prepare the Alpine rootfs
+## Optional legacy Alpine rootfs
 
-The included helper detects ARMv7 vs AArch64 and extracts an Alpine minirootfs:
+Registry mode does not need this step. For offline legacy use, the included helper detects ARMv7 vs AArch64 and extracts an Alpine minirootfs:
 
 ```sh
 ./scripts/setup-alpine-rootfs.sh
@@ -138,14 +161,14 @@ KUBECTL_REMOTE_COMMAND_WEBSOCKETS=true \
   exec alpine -- cat /etc/alpine-release
 ```
 
-PocketKube does not yet provide a real PTY, so `-t` is not required and interactive terminal behavior is intentionally incomplete. `-i` can be used for stdin streaming.
+Use `-it` for an interactive shell with a real pseudo-terminal, or `-i` alone for piped stdin. Terminal resize events and Ctrl-C are forwarded to the terminal.
 
 ## Start PocketKube
 
 On the Android device:
 
 ```sh
-pocketkube serve --runtime proot --rootfs "$HOME/rootfs/alpine"
+pocketkube serve --runtime proot
 ```
 
 For access from another machine on the same network:
@@ -153,7 +176,6 @@ For access from another machine on the same network:
 ```sh
 pocketkube serve \
   --runtime proot \
-  --rootfs "$HOME/rootfs/alpine" \
   --host 0.0.0.0 \
   --port 8443
 ```
@@ -181,6 +203,41 @@ Then:
 ```sh
 kubectl get pods --kubeconfig ~/.kube/pocketkube.kubeconfig
 ```
+
+## Inspect the local node
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig get nodes
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig get nodes -o wide
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig describe node
+```
+
+PocketKube exposes one node named after the host. Set `POCKETKUBE_NODE_NAME` before starting the server to choose a DNS-compatible name, and optionally `POCKETKUBE_NODE_IP` to advertise a host IPv4/IPv6 address. The IP is not guessed when omitted. New Pods receive this node's `spec.nodeName`; requests naming a different node are rejected.
+
+Node data includes host CPU/memory capacity, architecture, kernel, OS, and the PocketKube runtime adapter version. Capacity is informational, not an enforced allocation or scheduling guarantee. `Ready` means the PocketKube API is available; runtime health and resource pressure are not monitored. Node identity and age reset on server restart. Watches, node spec/status mutations, and node leases are not implemented; `describe node` may note that its lease is unavailable. Event lists are empty because events are not recorded yet.
+
+Node labels can be added, overwritten, or removed:
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig label node localhost mentored=ready
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig label node localhost mentored=busy --overwrite
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig label node localhost mentored-
+```
+
+Replace `localhost` with the name shown by `get nodes`. Label updates support JSON merge patch and strategic merge patch, resource-version conflict checks, and `--dry-run=server`. Labels remain in memory until PocketKube restarts; they do not add scheduling or node-selector enforcement.
+
+## Node resource usage
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig top nodes
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig top node NODE_NAME
+```
+
+PocketKube serves `metrics.k8s.io/v1` and `v1beta1` directly; no metrics-server installation is needed. CPU is the rate of aggregate host CPU time over a 250 ms sample, excluding idle and I/O wait. Memory is a host working-set estimate: `MemTotal - MemFree - Inactive(file)`. Samples are shared and cached for one second.
+
+These measurements cover the entire machine running PocketKube, including other applications. They are not per-Pod measurements or cgroup accounting, and can differ from kubelet/metrics-server figures. For the Docker backend they describe the PocketKube host, not a remote Docker daemon. CPU/memory allocatable values equal the reported host capacity because PocketKube reserves no resources; neither value enforces limits.
+
+Linux/Android must permit reading `/proc/stat` and `/proc/meminfo`. Restricted devices return a metrics-unavailable error instead of fabricated usage. `kubectl top pods`, metrics watches, and label selectors are not supported.
 
 ## Run the included Pod
 
@@ -222,7 +279,68 @@ kubectl exec -i \
   alpine -- /bin/sh
 ```
 
-A real PTY is not implemented yet, so `kubectl exec -it` will not behave exactly like Kubernetes.
+For an interactive terminal:
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig exec -it nginx -- /bin/sh
+```
+
+Ctrl-C interrupts the foreground command; it normally leaves the shell open. Type `exit` or press Ctrl-D on an empty command line to leave the shell. Disconnecting the client terminates the exec session.
+
+## Run nginx with PRoot
+
+Use `examples/nginx.yaml` to run `nginx:alpine` on port **8080**. The example updates nginx's listener before calling its original entrypoint. PRoot's simulated root does not grant permission to bind privileged host ports such as 80; `containerPort` by itself does not configure nginx or forward a port.
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig apply -f examples/nginx.yaml --validate=false
+curl http://127.0.0.1:8080
+```
+
+Run curl on the PocketKube host, or use `http://PHONE_IP:8080` from another machine. Networking is shared with the host, so port 8080 must be free. If replacing a failed Pod, delete it before applying the example again.
+
+The runtime provides `/proc`, basic devices, and guest standard-stream links. Startup failures include the last 64 KiB of combined stdout/stderr in the Pod status message.
+
+## Forward a Pod port
+
+```sh
+KUBECTL_PORT_FORWARD_WEBSOCKETS=true \
+  kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig \
+  port-forward pod/nginx 18080:8080
+```
+
+Then open `http://127.0.0.1:18080` on the machine running kubectl. Ctrl-C stops forwarding without stopping the Pod. Multiple ports and simultaneous TCP connections are supported. The Pod must be Running, and its application must actually listen on the target port; `containerPort` does not start a listener.
+
+PocketKube supports kubectl's `SPDY/3.1+portforward.k8s.io` WebSocket tunnel (also accepted as `v2.portforward.k8s.io`). Use a kubectl version supporting WebSocket port forwarding, such as 1.31 or newer. Legacy direct HTTP SPDY upgrades and the Python client's older channel-based port-forward protocol are not supported.
+
+PRoot uses the host network, so the target is `127.0.0.1:REMOTE_PORT` on the PocketKube device. This does not isolate ports between Pods. A Chisel reverse-forward listener on a remote server is not a listener on the phone and cannot be reached by forwarding the same phone port.
+
+The Docker backend connects to the container IP (or host loopback for host-network containers), which requires a local Docker daemon with a container network reachable from PocketKube, typically native Linux. Remote Docker daemons and Docker Desktop VM networks are not guaranteed to be reachable.
+
+Each tunnel allows up to 64 concurrent TCP connections. Stream pairing times out after 30 seconds, TCP connection attempts after 10 seconds, and stalled forwarding writes are bounded. Sockets close on client disconnect or Pod deletion. UDP forwarding is not supported.
+
+## View container logs
+
+Read the main container's combined stdout/stderr:
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig logs nginx
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig logs -f nginx --tail=20 --timestamps
+```
+
+Use Ctrl-C to stop following; the Pod keeps running. Requests to nginx on port 8080 generate access logs. Output from `kubectl exec` is separate from the main container's logs.
+
+Additional supported options include `-c CONTAINER`, `--since=5m`, `--since-time=2026-09-15T00:00:00Z`, and `--limit-bytes=4096`. Use either `--since` or `--since-time`. `--tail=0 -f` follows only new output.
+
+To try a continuously logging Pod:
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig apply -f examples/logs.yaml --validate=false
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig logs -f logs-demo
+```
+
+PRoot retains recent logs in memory, capped at 1 MiB or 16,384 records per Pod (whichever is reached first). A record is a line or a fragment of a long/partially written line. Older output is discarded; very slow followers can miss discarded output. Timestamps record when PocketKube receives each line. Failed-start logs remain readable until Pod deletion. Deleting a Pod clears its logs and ends followers; server restarts lose PRoot log history. Restart PocketKube and recreate existing Pods after upgrading to enable capture.
+
+The Docker backend reads the Docker daemon's retained logs. `--previous` is unsupported because PocketKube does not manage container restarts. Logging covers stdout/stderr, not arbitrary files inside the container.
 
 ## Run the included Deployment
 
@@ -251,7 +369,7 @@ pocketkube serve
 Equivalent explicit command:
 
 ```sh
-pocketkube serve --runtime proot --rootfs ~/rootfs/alpine
+pocketkube serve --runtime proot
 ```
 
 For desktop development with Docker:
@@ -264,31 +382,25 @@ Environment variables are also supported:
 
 ```sh
 export POCKETKUBE_RUNTIME=proot
-export POCKETKUBE_PROOT_ROOTFS=$HOME/rootfs/alpine
+export POCKETKUBE_IMAGE_DIR=$HOME/.pocketkube/images
 pocketkube serve
 ```
 
 ## Current raw PRoot semantics
 
-A Pod is represented primarily by a PRoot process plus a shared root filesystem:
+A Pod runs in its own filesystem copy through PRoot. `kubectl exec` starts another PRoot process against that same copy. There are no real container namespaces or cgroups, and this is not a security boundary.
 
-```text
-Pod
- |- Kubernetes metadata/status held by PocketKube
- |- PRoot process PID
- `- Alpine rootfs: ~/rootfs/alpine
-```
-
-`kubectl exec` starts another PRoot process against the same rootfs. There are no real container namespaces or cgroups.
-
-Because the current implementation shares one Alpine rootfs across all Pods, filesystem writes are also shared. This is intentional for the first lightweight version.
+For legacy offline Alpine operation, explicitly pass `--rootfs ~/rootfs/alpine` or set `POCKETKUBE_PROOT_ROOTFS`. In this mode `alpine` / `alpine:*` use that directory as the source and ignore the requested tag; other images still use the registry. Omit this option to pull the actual Alpine tag.
 
 ## Supported API subset
 
 Core `v1`:
 
+- Nodes: GET/LIST and PATCH metadata.labels (cluster-scoped)
 - Namespaces: GET/LIST/CREATE/DELETE
 - Pods: GET/LIST/CREATE/DELETE
+- Pods log: GET, including streaming follow
+- Pods portforward: WebSocket TCP tunneling
 - Pods exec: WebSocket `v5.channel.k8s.io`, with v4 fallback
 
 `apps/v1`:
@@ -307,9 +419,7 @@ Discovery endpoints:
 
 PocketKube currently does not implement:
 
-- arbitrary OCI/Docker image pulling
-- Docker image ENTRYPOINT/CMD discovery in the PRoot backend
-- real filesystem isolation between Pods
+- security isolation between Pods
 - Services, DNS, CNI, Pod IPs, NetworkPolicy
 - cgroups / CPU / memory limits
 - Linux namespace isolation
@@ -320,20 +430,19 @@ PocketKube currently does not implement:
 - ReplicaSets as persisted objects
 - Deployment reconciliation / rolling updates
 - server-side apply / strategic merge patch
-- logs / attach / port-forward
+- attach
 - init containers or multiple containers per Pod
-- true PTY allocation for `kubectl exec -t`
 - authentication, authorization, TLS, admission control
 - persistence across PocketKube server restarts
 
 ## Recommended next steps
 
-1. OCI registry client + layer/whiteout extraction for arbitrary images.
-2. Per-Pod copy-on-write-ish rootfs strategy that does not require overlayfs.
+1. Private registry authentication and additional layer formats.
+2. Reduce the disk overhead of full per-Pod filesystem copies.
 3. Persistent SQLite state.
 4. Deployment reconciliation loop.
-5. `kubectl logs`.
-6. PTY support for `kubectl exec -it`.
+5. Persistent log storage and configurable rotation.
+6. Additional terminal compatibility testing on legacy Android devices.
 7. User-space port mapping / lightweight Services.
 8. Tiny remote node agent so multiple Android phones can act as simulated Kubernetes nodes.
 
@@ -355,4 +464,4 @@ pip install -e . --no-deps
 
 ### Exec and TTY
 
-`kubectl exec` uses the Kubernetes WebSocket remote-command protocol. PocketKube does not yet allocate a real PTY; when `-t` is requested it merges stderr into stdout as Kubernetes expects, but terminal-specific behavior is still limited.
+`kubectl exec` uses the Kubernetes WebSocket remote-command protocol. With `-t`, PocketKube allocates a controlling PTY and forwards resize events; terminal stderr shares stdout. Without `-t`, stdin/stdout/stderr remain separate pipes. The host must support PTY allocation for interactive sessions.
