@@ -191,6 +191,10 @@ The setup script intentionally uses `busybox tar` to avoid that old extraction b
 
 ## Verify raw PRoot manually
 
+PocketKube detects whether the installed PRoot supports `--link2symlink` and
+only enables it when advertised by `proot --help`. For the manual command below,
+omit that option if your PRoot build does not support it.
+
 Modern Termux should launch PRoot without a forced `LD_LIBRARY_PATH`. PocketKube removes inherited `LD_LIBRARY_PATH` when `PREFIX` is set, avoiding collisions with Android system libraries (including the `libunwindstack.so` / `Xzs_Construct` linker error).
 
 For legacy Android 5/6 Termux installations that require `$PREFIX/lib` to find `libtalloc` or `libandroid-support`, explicitly set:

@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from .base import ExecResult
 from .logs import LogBuffer, LogOptions
-from .terminal import spawn_terminal
+from .terminal import spawn_terminal, terminal_host_command
 from .images import Image, ImageStore, guest_path, remove
 
 
@@ -18,6 +19,7 @@ class RawProotRuntime:
 
     def __init__(self, binary: str = "proot", rootfs: str | Path | None = None) -> None:
         self.binary = binary
+        self._link2symlink: bool | None = None
         configured = rootfs or os.environ.get("POCKETKUBE_PROOT_ROOTFS")
         self.rootfs = Path(configured).expanduser() if configured else None
         self.images = ImageStore()
@@ -84,6 +86,25 @@ class RawProotRuntime:
             result.append(f"{name}={item['value']}")
         return result
 
+    def _supports_link2symlink(self) -> bool:
+        # This extension is not present in every PRoot build. Probe once using
+        # the host environment (and Android linker) also used for execution.
+        if self._link2symlink is None:
+            self._link2symlink = False
+            try:
+                env = self._host_environment()
+                result = subprocess.run(
+                    terminal_host_command([self.binary, "--help"], env),
+                    env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    timeout=2, check=False,
+                )
+                self._link2symlink = result.returncode == 0 and b"--link2symlink" in result.stdout
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                # Let the actual launch report any executable/linker failure.
+                pass
+        return self._link2symlink
+
     def _proot_command(
         self,
         rootfs: Path,
@@ -96,7 +117,7 @@ class RawProotRuntime:
         guest_command = [str(x) for x in command]
         base = [
             self.binary,
-            "--link2symlink",
+            *(["--link2symlink"] if self._supports_link2symlink() else []),
             "-0",
             "-r",
             str(rootfs),

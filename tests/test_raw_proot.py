@@ -12,10 +12,11 @@ def make_rootfs(tmp_path: Path) -> Path:
     return rootfs
 
 
-def test_raw_proot_accepts_alpine_and_builds_command(tmp_path):
+def test_raw_proot_accepts_alpine_and_builds_command(tmp_path, monkeypatch):
     rootfs = make_rootfs(tmp_path)
     runtime = RawProotRuntime(rootfs=rootfs)
 
+    monkeypatch.setattr(runtime, "_supports_link2symlink", lambda: True)
     assert runtime._rootfs_for_image("alpine:3.24") == rootfs
 
     cmd = runtime._proot_command(
@@ -166,3 +167,40 @@ def test_empty_library_override_and_non_termux_environment(monkeypatch, tmp_path
     assert runtime._host_environment()["LD_LIBRARY_PATH"] == "/custom/lib"
     monkeypatch.setenv("POCKETKUBE_PROOT_LD_LIBRARY_PATH", "")
     assert "LD_LIBRARY_PATH" not in runtime._host_environment()
+
+
+@pytest.mark.parametrize('help_output,exit_code,supported', [
+    (b'Usage: proot -r rootfs', 0, False),
+    (b'Usage: proot --link2symlink', 0, True),
+    (b'unknown option --link2symlink', 1, False),
+])
+def test_optional_proot_extension_is_detected_and_cached(tmp_path, monkeypatch, help_output, exit_code, supported):
+    import subprocess
+    runtime = RawProotRuntime(rootfs=make_rootfs(tmp_path))
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append(command)
+        assert kwargs['env'] == runtime._host_environment()
+        assert kwargs['timeout'] == 2
+        return subprocess.CompletedProcess(command, exit_code, help_output)
+
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.subprocess.run', probe)
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.terminal_host_command', lambda cmd, env: cmd)
+    for command in (['/bin/sh'], ['echo', 'exec']):
+        argv = runtime._proot_command(runtime.rootfs, command)
+        assert ('--link2symlink' in argv) == supported
+        assert '-0' in argv
+    assert calls == [['proot', '--help']]
+
+
+def test_proot_probe_failure_omits_optional_flag(tmp_path, monkeypatch):
+    import subprocess
+    runtime = RawProotRuntime(rootfs=make_rootfs(tmp_path))
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired('proot', 2)
+
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.subprocess.run', timeout)
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.terminal_host_command', lambda cmd, env: cmd)
+    assert '--link2symlink' not in runtime._proot_command(runtime.rootfs, ['/bin/sh'])
