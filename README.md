@@ -59,7 +59,70 @@ Images are cached under `~/.pocketkube/images/<registry>/<repository>/sha256-<di
 
 This initial puller supports public anonymous pulls, SHA-256, and uncompressed/gzip layers. Private registry credentials, imagePullSecrets, and zstd layers are not yet supported. Images with `/bin/sh` use the normal environment wrapper; shell-less images run directly without requiring `/bin/sh` or `/usr/bin/env`. Device nodes are skipped during rootless extraction. Kernel-dependent images still face PRoot limitations.
 
-## Termux installation
+## Interactive installation (Termux and Linux)
+
+Run this in an interactive terminal after installing `curl`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BrunoMeyer/pocketkube/main/install.sh | bash
+```
+
+The installer asks for an installation directory, branch or release tag, runtime
+(`proot` or `docker`), API listen address and port, metrics scope, and kubeconfig
+path. It also offers to **launch the server immediately** in the foreground.
+Prompts read from your terminal, so they work with `curl | bash`.
+
+On Termux, it offers to install missing Python, Git, and PRoot packages using
+`pkg`. On other Linux systems, install Python 3.8+ with `venv`/pip support, Git,
+and PRoot (or a working Docker installation) using your package manager first.
+It installs PocketKube and its Python dependencies into an isolated virtual
+environment; it does not require a pre-extracted rootfs. `kubectl` is installed
+separately on whichever machine you use as a client.
+
+Default locations:
+
+- Installation: `~/.local/share/pocketkube` (must be absent or empty).
+- Server settings: `~/.local/share/pocketkube/config.env`.
+- Launcher: `~/.local/share/pocketkube/start.sh`.
+- Kubeconfig: `~/.kube/pocketkube.kubeconfig` (replacement requires confirmation).
+
+Start the server later with:
+
+```sh
+~/.local/share/pocketkube/start.sh
+```
+
+Keep that terminal open; Ctrl-C stops the server. The installer does not register
+a background service or start it at boot. Edit `config.env` to change the saved
+settings, then restart the launcher. On Termux, metrics default to
+`visible-processes`, which measures accessible processes rather than whole-device
+usage; on Linux they default to `host`.
+
+The API defaults to `127.0.0.1`. It has no authentication: only bind to a network
+address such as `0.0.0.0` on a trusted network. The generated kubeconfig connects
+locally; for a remote client, copy it and change `server` to the device's reachable
+address. Test with:
+
+```sh
+kubectl --kubeconfig ~/.kube/pocketkube.kubeconfig get nodes
+```
+
+To inspect the installer before running it:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/BrunoMeyer/pocketkube/main/install.sh -o install.sh
+less install.sh
+bash install.sh
+```
+
+Existing installations are preserved: select a new directory when installing
+another version. If installation fails, its partial files remain in the chosen
+directory for inspection; remove those files or choose another directory before
+retrying. The download URL becomes available once this file is published on the
+repository's `main` branch. For a published release tag, replace `main` in the URL
+with that tag and select the same tag at the installer's version prompt.
+
+## Manual Termux installation
 
 Install the dependencies available in your Termux repository:
 
