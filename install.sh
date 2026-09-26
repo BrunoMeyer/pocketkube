@@ -26,6 +26,65 @@ absolute_path() {
     esac
 }
 
+
+install_dependencies() {
+    local runtime=$1 termux=$2 manager=none python='' answer
+    local -a packages=() privilege=()
+    # Termux also provides apt; prefer its pkg wrapper there.
+    if [[ $termux == yes ]] && command -v pkg >/dev/null; then
+        manager=pkg
+    elif [[ $termux != yes ]] && command -v apt >/dev/null; then
+        manager=apt
+    elif [[ $termux != yes ]] && command -v apt-get >/dev/null; then
+        manager=apt-get
+    fi
+    python=$(command -v python3 || command -v python || true)
+    if [[ -z $python ]]; then
+        if [[ $termux == yes ]]; then
+            packages+=(python)
+        else
+            packages+=(python3 python3-venv python3-pip)
+        fi
+    elif ! "$python" -c 'import venv, ensurepip' >/dev/null 2>&1; then
+        if [[ $termux == yes ]]; then
+            packages+=(python python-pip)
+        else
+            packages+=(python3-venv python3-pip)
+        fi
+    fi
+    command -v git >/dev/null || packages+=(git)
+    if [[ $runtime == proot ]]; then
+        command -v proot >/dev/null || packages+=(proot)
+    elif ! command -v docker >/dev/null; then
+        [[ $termux != yes ]] || fail 'Docker is not supported by this installer on Termux; choose proot.'
+        packages+=(docker.io)
+    fi
+    if ((${#packages[@]})); then
+        [[ $manager != none ]] || fail "No supported package manager found. Install these dependencies manually, then retry: ${packages[*]}"
+        choose answer "Install missing packages using $manager: ${packages[*]}?" yes 'yes|no'
+        [[ $answer == yes ]] || fail 'Required dependencies are missing; no packages were installed.'
+        if [[ $manager != pkg && $(id -u) != 0 ]]; then
+            command -v sudo >/dev/null || fail "Installing dependencies requires sudo. Ask an administrator to install: ${packages[*]}"
+            privilege=(sudo)
+        fi
+        # Package managers need a normal umask, and password prompts need the
+        # terminal rather than stdin carrying the downloaded shell script.
+        (
+            umask 022
+            if [[ $manager != pkg ]]; then
+                "${privilege[@]}" "$manager" update <&3 || exit 1
+            fi
+            "${privilege[@]}" "$manager" install -y "${packages[@]}" <&3
+        ) || fail 'Dependency installation failed; resolve the package manager error and retry.'
+        hash -r
+    fi
+    python=$(command -v python3 || command -v python || true)
+    [[ -n $python ]] || fail 'Python is still unavailable after dependency installation.'
+    "$python" -c 'import venv, ensurepip' >/dev/null 2>&1 || fail 'Python venv/pip support is still unavailable for the selected Python. Check your Python installation and PATH.'
+    command -v git >/dev/null || fail 'Git is still unavailable after dependency installation.'
+    command -v "$runtime" >/dev/null || fail "$runtime is still unavailable after dependency installation."
+}
+
 main() {
     if [[ ${1:-} == --help ]]; then
         printf 'Usage: bash install.sh\nInteractive Termux/Linux installer; requires a terminal.\n'
@@ -42,8 +101,35 @@ main() {
         metrics=visible-processes
     fi
     printf '\nPocketKube installer\n\n' >&3
-    ask install_dir 'Installation directory (must be empty)' "$HOME/.local/share/pocketkube"
+    ask install_dir 'Installation directory' "$HOME/.local/share/pocketkube"
     install_dir=$(absolute_path "$install_dir")
+    if [[ -x $install_dir/venv/bin/python && -f $install_dir/config.env && -x $install_dir/start.sh ]]; then
+        choose answer 'PocketKube is already installed. Skip installation or reinstall?' skip 'skip|reinstall'
+        if [[ $answer == reinstall ]]; then
+            ask ref 'Git branch or release tag' main
+            [[ $ref != -* && -n $ref ]] || fail 'Invalid branch or tag.'
+            # Reuse the existing settings; reinstall only the application.
+            runtime=$(source "$install_dir/config.env"; printf '%s' "$POCKETKUBE_RUNTIME")
+            install_dependencies "$runtime" "$termux"
+            local staging
+            staging=$(mktemp -d "$install_dir/reinstall.XXXXXX")
+            git clone --depth 1 --branch "$ref" -- "$repo" "$staging/source"
+            "$install_dir/venv/bin/python" -m pip install --upgrade --force-reinstall "$staging/source"
+            if [[ -e $install_dir/source ]]; then
+                mv -- "$install_dir/source" "$staging/previous-source"
+            fi
+            mv -- "$staging/source" "$install_dir/source"
+            printf 'Reinstalled PocketKube. Settings and kubeconfig preserved. Previous source (if present): %s/previous-source\n' "$staging"
+        else
+            printf 'Skipping installation. Existing settings and kubeconfig preserved.\n'
+        fi
+        printf 'Start server: %q\n' "$install_dir/start.sh"
+        choose start 'Launch the server now? (foreground; Ctrl-C stops it)' yes 'yes|no'
+        if [[ $start == yes ]]; then
+            exec "$install_dir/start.sh" <&3 3>&-
+        fi
+        return
+    fi
     [[ ! -e $install_dir && ! -L $install_dir ]] || {
         [[ -d $install_dir && -z $(ls -A -- "$install_dir") ]] || fail "Installation directory is not empty: $install_dir"
     }
@@ -68,23 +154,7 @@ main() {
     fi
     choose start 'Launch the server after installation? (foreground; Ctrl-C stops it)' yes 'yes|no'
 
-    local -a packages=()
-    command -v python3 >/dev/null || command -v python >/dev/null || packages+=(python)
-    command -v git >/dev/null || packages+=(git)
-    if [[ $runtime == proot ]]; then
-        command -v proot >/dev/null || packages+=(proot)
-    else
-        command -v docker >/dev/null || fail 'Install Docker and configure access to its daemon, then rerun this installer.'
-    fi
-    if ((${#packages[@]})); then
-        if [[ $termux == yes ]] && command -v pkg >/dev/null; then
-            choose answer "Install missing Termux packages: ${packages[*]}?" yes 'yes|no'
-            [[ $answer == yes ]] || fail 'Required dependencies are missing.'
-            pkg install -y "${packages[@]}"
-        else
-            fail "Install these dependencies with your package manager, then retry: ${packages[*]}. Python must include venv and pip."
-        fi
-    fi
+    install_dependencies "$runtime" "$termux"
     local python
     python=$(command -v python3 || command -v python)
     "$python" -c 'import sys; sys.exit("Python 3.8 or newer is required") if sys.version_info < (3,8) else None'

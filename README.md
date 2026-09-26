@@ -72,16 +72,22 @@ The installer asks for an installation directory, branch or release tag, runtime
 path. It also offers to **launch the server immediately** in the foreground.
 Prompts read from your terminal, so they work with `curl | bash`.
 
-On Termux, it offers to install missing Python, Git, and PRoot packages using
-`pkg`. On other Linux systems, install Python 3.8+ with `venv`/pip support, Git,
-and PRoot (or a working Docker installation) using your package manager first.
+The installer detects Termux and uses `pkg install`; on Debian/Ubuntu-style
+Linux systems it uses `apt install` (or `apt-get` if `apt` is unavailable). It
+offers to install missing Python, Python `venv`/pip support, Git, and PRoot, or
+`docker.io` when the Docker runtime is selected. On Linux it refreshes package
+indexes first and uses `sudo` when needed; Termux does not require root. Declining
+the prompt leaves system packages unchanged. On other distributions, install
+these dependencies with your package manager before running the installer.
+Python 3.8+ is required. Docker must have a running daemon accessible to your
+user; the installer checks access but does not change group membership.
 It installs PocketKube and its Python dependencies into an isolated virtual
 environment; it does not require a pre-extracted rootfs. `kubectl` is installed
 separately on whichever machine you use as a client.
 
 Default locations:
 
-- Installation: `~/.local/share/pocketkube` (must be absent or empty).
+- Installation: `~/.local/share/pocketkube` (new or recognized existing installation).
 - Server settings: `~/.local/share/pocketkube/config.env`.
 - Launcher: `~/.local/share/pocketkube/start.sh`.
 - Kubeconfig: `~/.kube/pocketkube.kubeconfig` (replacement requires confirmation).
@@ -115,10 +121,18 @@ less install.sh
 bash install.sh
 ```
 
-Existing installations are preserved: select a new directory when installing
-another version. If installation fails, its partial files remain in the chosen
-directory for inspection; remove those files or choose another directory before
-retrying. The download URL becomes available once this file is published on the
+When the selected directory contains an installation created by this script,
+it asks whether to `skip` or `reinstall`, defaulting to **skip**. Skipping keeps
+the installed version and offers to launch it without downloading or installing
+packages. Reinstalling asks for a branch or tag and reinstalls the application
+and its Python dependencies while preserving `config.env` and the kubeconfig.
+The previous source checkout is retained under `reinstall.*/previous-source`.
+Both paths offer to launch the server afterward. Stop any running server before
+reinstalling so the next launch uses the updated application.
+
+Unrecognized nonempty directories are left untouched. If a new installation
+fails, its partial files remain in the chosen directory for inspection; remove
+those files or choose another directory before retrying. The download URL becomes available once this file is published on the
 repository's `main` branch. For a published release tag, replace `main` in the URL
 with that tag and select the same tag at the installer's version prompt.
 

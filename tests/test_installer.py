@@ -51,11 +51,16 @@ else:
     directory = tmp_path / 'installation $(touch INJECTED)'
     config = tmp_path / 'kube config'
 
-    def run(start='no', extra_env=None, port='8443', overwrite=None):
+    def run(start='no', extra_env=None, port='8443', overwrite=None, existing=None):
         answers = [str(directory), '', '', '', port, 'host', str(config)]
         if overwrite is not None:
             answers.append(overwrite)
         answers.append(start)
+        if existing is not None:
+            answers = [str(directory), existing]
+            if existing == 'reinstall':
+                answers.append('')
+            answers.append(start)
         master, slave = pty.openpty()
 
         def terminal():
@@ -113,9 +118,12 @@ def test_piped_interactive_install(installer, start):
     if launches:
         assert launches[0][3:] == ['--host', '127.0.0.1', '--port', '8443', '--runtime', 'proot']
     # A repeated installation must not overwrite the existing installation.
-    code, output, _ = run()
-    assert code != 0
-    assert 'Installation directory is not empty' in output
+    before = (directory / 'config.env').read_bytes(), config.read_bytes()
+    code, output, repeated_calls = run(existing='')
+    assert code == 0, output
+    assert 'Skipping installation' in output
+    assert repeated_calls == calls
+    assert before == ((directory / 'config.env').read_bytes(), config.read_bytes())
 
 
 def test_failed_package_install_does_not_launch_or_write_config(installer):
@@ -144,3 +152,124 @@ def test_invalid_port_stops_before_install(installer):
     assert 'Port must be from 1 to 65535' in output
     assert not calls
     assert not directory.exists()
+
+
+@pytest.mark.parametrize('termux,manager,uid,missing,expected', [
+    ('yes', 'pkg', '1000', 'python', ['python', 'git', 'proot']),
+    ('no', 'apt', '1000', 'python', ['python3', 'python3-venv', 'python3-pip', 'git', 'proot']),
+    ('no', 'apt', '0', 'venv', ['python3-venv', 'python3-pip', 'git', 'proot']),
+    ('no', 'apt-get', '0', 'python', ['python3', 'python3-venv', 'python3-pip', 'git', 'proot']),
+])
+def test_install_missing_dependencies(tmp_path, termux, manager, uid, missing, expected):
+    result, lines = dependency_run(tmp_path, termux, manager, uid, missing)
+    assert result.returncode == 0, result.stderr
+    commands = [line for line in lines if line.startswith(manager + ' ')]
+    assert commands[-1] == manager + ' install -y ' + ' '.join(expected)
+    assert (manager + ' update' in commands) == (termux == 'no')
+    assert any(line.startswith('sudo ') for line in lines) == (termux == 'no' and uid != '0')
+    assert 'umask=0022' in lines
+
+
+@pytest.mark.parametrize('answer,sudo,fail_install,expected', [
+    ('no', 'yes', 'no', 'no packages were installed'),
+    ('yes', 'no', 'no', 'requires sudo'),
+    ('yes', 'yes', 'yes', 'Dependency installation failed'),
+])
+def test_dependency_install_failures(tmp_path, answer, sudo, fail_install, expected):
+    result, lines = dependency_run(tmp_path, 'no', 'apt', '1000', 'python',
+                                   answer, sudo, fail_install)
+    assert result.returncode != 0
+    assert expected in result.stderr
+    if answer == 'no' or sudo == 'no':
+        assert not any(' install ' in line for line in lines)
+
+
+def dependency_run(tmp_path, termux, manager, uid, missing,
+                   answer='yes', sudo='yes', fail_install='no'):
+    # All package-manager and privilege commands are shell doubles; never invoke
+    # the machine's real apt/pkg/sudo, even when these tests run as root.
+    source = (ROOT / 'install.sh').read_text().rsplit('main "$@"', 1)[0]
+    doubles = r'''
+command() {
+    if [[ $1 != -v ]]; then builtin command "$@"; return; fi
+    case "$2" in
+        pkg) [[ $TEST_TERMUX == yes ]] && echo pkg;;
+        apt|apt-get) [[ $2 == "$TEST_MANAGER" || $TEST_TERMUX == yes ]] && echo "$2";;
+        sudo) [[ $TEST_SUDO == yes ]] && echo sudo;;
+        python3|python)
+            if [[ $TEST_MISSING != python || -f installed ]]; then echo python_stub; else return 1; fi;;
+        git|proot) [[ -f installed ]] && echo "$2";;
+        *) return 1;;
+    esac
+}
+python_stub() { [[ -f installed || $TEST_MISSING != venv ]]; }
+id() { echo "$TEST_UID"; }
+choose() { printf -v "$1" '%s' "$TEST_ANSWER"; }
+sudo() { echo "sudo $*" >> calls; "$@"; }
+package_manager() {
+    echo "$*" >> calls
+    echo "umask=$(umask)" >> calls
+    [[ $TEST_FAIL != yes ]] || return 1
+    if [[ $2 == install ]]; then touch installed; fi
+}
+apt() { package_manager apt "$@"; }
+apt-get() { package_manager apt-get "$@"; }
+pkg() { package_manager pkg "$@"; }
+exec 3</dev/null
+install_dependencies proot "$TEST_TERMUX"
+'''
+    env = dict(os.environ, TEST_TERMUX=termux, TEST_MANAGER=manager,
+               TEST_UID=uid, TEST_MISSING=missing, TEST_ANSWER=answer,
+               TEST_SUDO=sudo, TEST_FAIL=fail_install)
+    result = subprocess.run(['bash', '-c', source + doubles], cwd=tmp_path,
+                            env=env, capture_output=True, text=True, timeout=10)
+    log = tmp_path / 'calls'
+    return result, log.read_text().splitlines() if log.exists() else []
+
+
+def test_reinstall_preserves_settings_and_kubeconfig(installer):
+    run, directory, config = installer
+    code, output, _ = run()
+    assert code == 0, output
+    before = (directory / 'config.env').read_bytes(), config.read_bytes()
+    (directory / 'source' / 'old-source').write_text('previous checkout')
+    code, output, calls = run(existing='reinstall', start='yes')
+    assert code == 0, output
+    assert 'Reinstalled PocketKube' in output
+    assert before == ((directory / 'config.env').read_bytes(), config.read_bytes())
+    assert any(args[:4] == ['-m', 'pip', 'install', '--upgrade'] and '--force-reinstall' in args for args in calls)
+    assert list(directory.glob('reinstall.*/previous-source/old-source'))
+    assert calls[-1][:3] == ['-m', 'pocketkube.cli', 'serve']
+
+
+def test_skip_can_launch_existing_server(installer):
+    run, directory, config = installer
+    assert run()[0] == 0
+    code, output, calls = run(existing='skip', start='yes')
+    assert code == 0, output
+    assert calls[-1][:3] == ['-m', 'pocketkube.cli', 'serve']
+    assert sum(args[:2] == ['-m', 'pip'] for args in calls) == 1
+
+
+def test_unrecognized_directory_is_preserved(installer):
+    run, directory, _ = installer
+    directory.mkdir()
+    unrelated = directory / 'unrelated'
+    unrelated.write_text('keep me')
+    code, output, _ = run()
+    assert code != 0
+    assert 'Installation directory is not empty' in output
+    assert unrelated.read_text() == 'keep me'
+
+
+def test_failed_reinstall_does_not_launch_or_replace_source(installer):
+    run, directory, config = installer
+    assert run()[0] == 0
+    original = (directory / 'config.env').read_bytes(), config.read_bytes()
+    (directory / 'source' / 'old-source').write_text('previous checkout')
+    code, _, calls = run(existing='reinstall', start='yes',
+                         extra_env={'INSTALL_TEST_PIP_EXIT': '1'})
+    assert code != 0
+    assert original == ((directory / 'config.env').read_bytes(), config.read_bytes())
+    assert (directory / 'source' / 'old-source').read_text() == 'previous checkout'
+    assert not any(args[:3] == ['-m', 'pocketkube.cli', 'serve'] for args in calls)
