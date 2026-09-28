@@ -204,3 +204,55 @@ def test_proot_probe_failure_omits_optional_flag(tmp_path, monkeypatch):
     monkeypatch.setattr('pocketkube.runtime.raw_proot.subprocess.run', timeout)
     monkeypatch.setattr('pocketkube.runtime.raw_proot.terminal_host_command', lambda cmd, env: cmd)
     assert '--link2symlink' not in runtime._proot_command(runtime.rootfs, ['/bin/sh'])
+
+
+@pytest.mark.parametrize('prefix_key', ['PREFIX', 'TERMUX__PREFIX'])
+@pytest.mark.parametrize('retry_ok', [True, False])
+def test_missing_host_library_fallback(tmp_path, monkeypatch, prefix_key, retry_ok):
+    import subprocess
+    for key in ('PREFIX', 'TERMUX__PREFIX', 'POCKETKUBE_PROOT_LD_LIBRARY_PATH'):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv(prefix_key, str(tmp_path))
+    runtime = RawProotRuntime(rootfs=make_rootfs(tmp_path))
+    environments = []
+
+    def probe(command, **kwargs):
+        environments.append(kwargs['env'])
+        if len(environments) == 1:
+            return subprocess.CompletedProcess(command, 1, b'library "libtalloc.so.2" not found')
+        return subprocess.CompletedProcess(command, 0 if retry_ok else 1, b'--link2symlink')
+
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.subprocess.run', probe)
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.terminal_host_command', lambda cmd, env: cmd)
+    runtime._proot_command(runtime.rootfs, ['/bin/sh'])
+    runtime._proot_command(runtime.rootfs, ['/bin/sh'])
+    assert len(environments) == 2
+    assert 'LD_LIBRARY_PATH' not in environments[0]
+    assert environments[1]['LD_LIBRARY_PATH'] == str(tmp_path / 'lib')
+    assert runtime._host_environment().get('LD_LIBRARY_PATH') == (str(tmp_path / 'lib') if retry_ok else None)
+    assert runtime._supports_link2symlink() == retry_ok
+
+
+@pytest.mark.parametrize('override,diagnostic', [
+    ('', b'library "libtalloc.so.2" not found'),
+    ('/custom/lib', b'library "libtalloc.so.2" not found'),
+    (None, b'cannot locate symbol "Xzs_Construct"'),
+])
+def test_library_fallback_respects_override_and_other_errors(tmp_path, monkeypatch, override, diagnostic):
+    import subprocess
+    monkeypatch.setenv('PREFIX', str(tmp_path))
+    monkeypatch.delenv('POCKETKUBE_PROOT_LD_LIBRARY_PATH', raising=False)
+    if override is not None:
+        monkeypatch.setenv('POCKETKUBE_PROOT_LD_LIBRARY_PATH', override)
+    runtime = RawProotRuntime(rootfs=tmp_path)
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 1, diagnostic)
+
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.subprocess.run', probe)
+    monkeypatch.setattr('pocketkube.runtime.raw_proot.terminal_host_command', lambda cmd, env: cmd)
+    assert not runtime._supports_link2symlink()
+    assert len(calls) == 1
+    assert runtime._legacy_library_path is None

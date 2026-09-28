@@ -197,7 +197,13 @@ omit that option if your PRoot build does not support it.
 
 Modern Termux should launch PRoot without a forced `LD_LIBRARY_PATH`. PocketKube removes inherited `LD_LIBRARY_PATH` when `PREFIX` is set, avoiding collisions with Android system libraries (including the `libunwindstack.so` / `Xzs_Construct` linker error).
 
-For legacy Android 5/6 Termux installations that require `$PREFIX/lib` to find `libtalloc` or `libandroid-support`, explicitly set:
+If the PRoot startup probe reports a missing `libtalloc` or `libandroid-support`,
+PocketKube retries it with `$PREFIX/lib` (also supporting `TERMUX__PREFIX`). It
+keeps that fallback for Pod startup and exec only if the retry succeeds. Explicit
+library-path overrides take precedence, including an empty override.
+
+For legacy Termux installations, you can also select the path manually before
+starting the server:
 
 ```sh
 export POCKETKUBE_PROOT_LD_LIBRARY_PATH="$PREFIX/lib"

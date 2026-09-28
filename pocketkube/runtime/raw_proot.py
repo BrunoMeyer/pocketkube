@@ -19,6 +19,7 @@ class RawProotRuntime:
 
     def __init__(self, binary: str = "proot", rootfs: str | Path | None = None) -> None:
         self.binary = binary
+        self._legacy_library_path: str | None = None
         self._link2symlink: bool | None = None
         configured = rootfs or os.environ.get("POCKETKUBE_PROOT_ROOTFS")
         self.rootfs = Path(configured).expanduser() if configured else None
@@ -69,7 +70,9 @@ class RawProotRuntime:
                 env["LD_LIBRARY_PATH"] = override
             else:
                 env.pop("LD_LIBRARY_PATH", None)
-        elif env.get("PREFIX"):
+        elif self._legacy_library_path is not None:
+            env["LD_LIBRARY_PATH"] = self._legacy_library_path
+        elif env.get("PREFIX") or env.get("TERMUX__PREFIX"):
             env.pop("LD_LIBRARY_PATH", None)
 
         # A Termux preload library must not leak into guest programs.
@@ -99,6 +102,23 @@ class RawProotRuntime:
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     timeout=2, check=False,
                 )
+                prefix = env.get("PREFIX") or env.get("TERMUX__PREFIX")
+                missing_library = b"not found" in result.stdout and any(
+                    name in result.stdout for name in (b"libtalloc.so", b"libandroid-support.so")
+                )
+                if (result.returncode != 0 and missing_library and prefix
+                        and "POCKETKUBE_PROOT_LD_LIBRARY_PATH" not in env):
+                    candidate = dict(env, LD_LIBRARY_PATH=str(Path(prefix) / "lib"))
+                    retry = subprocess.run(
+                        terminal_host_command([self.binary, "--help"], candidate),
+                        env=candidate, stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        timeout=2, check=False,
+                    )
+                    # Keep the fallback only if it actually fixes host startup.
+                    if retry.returncode == 0:
+                        self._legacy_library_path = candidate["LD_LIBRARY_PATH"]
+                        result = retry
                 self._link2symlink = result.returncode == 0 and b"--link2symlink" in result.stdout
             except (OSError, RuntimeError, subprocess.TimeoutExpired):
                 # Let the actual launch report any executable/linker failure.
